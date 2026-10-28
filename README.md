@@ -1,6 +1,6 @@
 # FileHalo for Mac
 
-A native Swift/AppKit/SwiftUI recreation of the workflow visible in the supplied Tangerine video. Installed at `/Applications/FileHalo.app`. A second app bundle and all source code are included here.
+A native Swift/AppKit/SwiftUI file conversion app for macOS. The portable app bundle and source code are included here.
 
 ## Use
 
@@ -26,7 +26,7 @@ You can also use the FileHalo menu-bar icon → **Choose File…**, then click a
 
 ## Scope and current limits
 
-The wheel follows the video layout with a native macOS glass treatment. PDF/DOCX text conversion does not reconstruct original page layout. Annotations support freehand strokes; redactions support rectangles. Compression exports JPEG and flattens transparency. Editors operate on the first page of PDFs; conversion exports all pages. Dragging currently handles the first file in a selection. The portable release bundles FFmpeg and WebP tools, so recipients do not need Homebrew.
+FileHalo uses a compact circular wheel for file formats and image tools, styled with native macOS glass materials. PDF/DOCX text conversion does not reconstruct original page layout. Annotations support freehand strokes; redactions support rectangles. Compression exports JPEG and flattens transparency. Editors operate on the first page of PDFs; conversion exports all pages. Dragging currently handles the first file in a selection. The portable release bundles FFmpeg and WebP tools, so recipients do not need Homebrew.
 
 The free direct-download release is ad-hoc signed and not Apple-notarized. macOS may require Control-click → Open on first launch. FileHalo registers itself as a login item on first launch; approve it under System Settings → General → Login Items if prompted. The download site includes the first-launch steps. The bundled FFmpeg is GPL-enabled; see `THIRD_PARTY_NOTICES.md` and the license/source files in the app bundle.
 
