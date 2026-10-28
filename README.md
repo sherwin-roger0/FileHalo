@@ -26,7 +26,7 @@ You can also use the FileHalo menu-bar icon → **Choose File…**, then click a
 
 ## Scope and current limits
 
-This is an independent recreation from a 21-second video, not Tangerine’s original source or a verified copy of its complete feature set. The wheel follows the video layout with a native macOS glass treatment, rather than matching the video pixel for pixel. PDF/DOCX text conversion does not reconstruct original page layout. Annotations support freehand strokes; redactions support rectangles. Compression exports JPEG and flattens transparency. Editors operate on the first page of PDFs; conversion exports all pages. Dragging currently handles the first file in a selection. The portable release bundles FFmpeg and WebP tools, so recipients do not need Homebrew.
+The wheel follows the video layout with a native macOS glass treatment. PDF/DOCX text conversion does not reconstruct original page layout. Annotations support freehand strokes; redactions support rectangles. Compression exports JPEG and flattens transparency. Editors operate on the first page of PDFs; conversion exports all pages. Dragging currently handles the first file in a selection. The portable release bundles FFmpeg and WebP tools, so recipients do not need Homebrew.
 
 The free direct-download release is ad-hoc signed and not Apple-notarized. macOS may require Control-click → Open on first launch. FileHalo registers itself as a login item on first launch; approve it under System Settings → General → Login Items if prompted. The download site includes the first-launch steps. The bundled FFmpeg is GPL-enabled; see `THIRD_PARTY_NOTICES.md` and the license/source files in the app bundle.
 
