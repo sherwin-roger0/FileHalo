@@ -1,0 +1,9 @@
+FILEHALO FOR MAC — INSTALL
+
+1. Download and unzip FileHalo-macOS-AppleSilicon.zip.
+2. Move FileHalo.app to Applications.
+3. On first launch, macOS may say the app is from an unidentified developer because this free build is not notarized. Control-click FileHalo.app, choose Open, then choose Open in the dialog. You only need to do this once per downloaded version.
+4. Approve automatic launch at login in System Settings > General > Login Items if macOS asks.
+
+Requires macOS 14 or later on an Apple silicon Mac (M1 or newer).
+The download includes FFmpeg and WebP support; Homebrew is not required.
