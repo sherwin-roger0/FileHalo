@@ -2,6 +2,14 @@
 
 A native Swift/AppKit/SwiftUI file conversion app for macOS. The portable app bundle and source code are included here.
 
+## Watch FileHalo in action
+
+[![Watch the FileHalo product demo](media/filehalo-demo.jpg)](https://filehalo.artificialwizard.in/#demo)
+
+Watch the [75-second narrated product demo](https://filehalo.artificialwizard.in/#demo) to see file conversion, the Shift wheel, cropping, and background styling. The video includes on-screen captions.
+
+[Open or download the demo video](https://filehalo.artificialwizard.in/media/filehalo-demo.mp4) · [Download FileHalo for Mac](https://filehalo.artificialwizard.in/)
+
 ## Use
 
 Open FileHalo. Drag a file from Finder and hold Shift briefly. Drop onto a segment to convert. Keep holding Shift for about 1.25 seconds to switch to the image tools wheel. Outputs are saved alongside the original with a unique filename. Existing files are never overwritten.

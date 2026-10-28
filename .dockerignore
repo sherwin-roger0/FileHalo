@@ -1,0 +1,7 @@
+.git
+.DS_Store
+work/
+build/
+release/
+release */
+Untitled*.mp4
