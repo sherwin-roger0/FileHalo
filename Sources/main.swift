@@ -479,7 +479,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var status: NSStatusItem!; var panel: NSPanel!; var radial: RadialView!; var timer: Timer?; var windows: [NSWindow] = []; var welcome: NSWindow?
     var conversionPanel: NSPanel?; let conversions = ConversionCenter()
     let conversionQueue: OperationQueue = { let queue = OperationQueue(); queue.name = "FileHalo.Conversions"; queue.maxConcurrentOperationCount = 2; queue.qualityOfService = .userInitiated; return queue }()
-    var current: URL?; var shiftStart: Date?; var manual = false
+    var current: URL?; var shiftTracking = false; var manual = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         // Follow the system appearance, including dark mode.
@@ -496,7 +496,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { self?.panel.orderOut(nil); self?.manual = false; return nil }; return event
         }
-        if let i = CommandLine.arguments.firstIndex(of:"--preview"), CommandLine.arguments.count > i+2 { perform(URL(fileURLWithPath:CommandLine.arguments[i+1]),CommandLine.arguments[i+2]) } else { showWelcome() }
+        if let i = CommandLine.arguments.firstIndex(of:"--preview"), CommandLine.arguments.count > i+2 { perform(URL(fileURLWithPath:CommandLine.arguments[i+1]),CommandLine.arguments[i+2]) }
     }
     func registerLoginItem() {
         guard #available(macOS 13.0, *) else { return }
@@ -525,7 +525,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             HStack { Image(systemName: "circle.hexagongrid.fill").font(.system(size: 42)).foregroundStyle(.primary); Text("FileHalo").font(.system(size: 36,weight: .bold,design: .rounded)) }
             Text("A little circle. A lot of possibilities.").font(.title3)
             Text("1. Start dragging a file in Finder or on your desktop.\n2. Hold Shift briefly to summon the wheel.\n3. Drop onto a format or tool.").lineSpacing(8)
-            Text("Hold Shift for another moment to switch between formats and image tools. Converted files are saved beside the original. PDFs export every page to images.").foregroundStyle(.secondary)
+            Text("Drop on Tools to see image tools, or Formats to return to format choices. Converted files are saved beside the original. PDFs export every page to images.").foregroundStyle(.secondary)
             HStack { Button("Choose a File…") { self.choose() }.buttonStyle(.borderedProminent).tint(.gray) }
             Text("Runs locally • No uploads • Look for the FileHalo icon in the menu bar").font(.caption).foregroundStyle(.secondary)
         }.padding(30).frame(width: 440).background(Color.clear)
@@ -551,14 +551,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if dragging && shift {
             let pb = NSPasteboard(name: .drag)
             if let u = (pb.readObjects(forClasses: [NSURL.self],options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first {
-                if shiftStart == nil { shiftStart = Date(); current = u }
-                let elapsed = Date().timeIntervalSince(shiftStart!)
-                if elapsed > 0.16 { let tools = elapsed > 1.25 && ((try? loadImage(u)) != nil); let desired = tools ? ["Compress","Metadata","Edit","Annotate","Add BG","Crop","Redact","Formats"] : formats(u)
-                    if !panel.isVisible || radial.actions != desired { display(u,tools: tools) }
-                }
+                if !shiftTracking { shiftTracking = true; current = u }
+                let desired = formats(u)
+                if !panel.isVisible || radial.actions != desired { display(u,tools: false) }
             }
         } else {
-            shiftStart = nil
+            shiftTracking = false
             if !manual && panel.isVisible && !dragging { panel.orderOut(nil) }
         }
 
