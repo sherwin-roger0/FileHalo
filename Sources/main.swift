@@ -228,6 +228,16 @@ func isImageFile(_ url: URL) -> Bool {
     UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
 }
 
+func draggedFileURLs(from pasteboard: NSPasteboard) -> [URL] {
+    let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    let items = (pasteboard.pasteboardItems ?? []).compactMap { item -> URL? in
+        guard let string = item.string(forType: .fileURL), let url = URL(string: string), url.isFileURL else { return nil }
+        return url
+    }
+    // Retain the complete ordered representation of the drag selection.
+    return items.count >= objects.count ? items : objects
+}
+
 func convertImagesToPDF(_ images: [URL], progress: ((Double) -> Void)? = nil) throws -> [URL] {
     guard images.count > 1, images.allSatisfy(isImageFile), let first = images.first else {
         throw failure("Multiple selection is supported only for images combined into a PDF.")
@@ -245,6 +255,9 @@ func convertImagesToPDF(_ images: [URL], progress: ((Double) -> Void)? = nil) th
         progress?(Double(index + 1) / Double(images.count) * 0.95)
     }
     guard document.write(to: reservation.url) else { throw failure("Could not save the combined PDF.") }
+    guard let saved = PDFDocument(url: reservation.url), saved.pageCount == images.count else {
+        throw failure("The PDF did not contain every selected image. No incomplete PDF was kept.")
+    }
     complete = true
     progress?(1)
     return [reservation.url]
@@ -267,6 +280,7 @@ struct PDFPageOrderView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Combine images into PDF").font(.title2)
+            Text("\(order.images.count) images → \(order.images.count) pages").font(.headline)
             Text("Check the page order below. Finder may send files in its display order rather than the order you clicked them.").font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(spacing: 8) {
@@ -280,13 +294,13 @@ struct PDFPageOrderView: View {
                         }.padding(8)
                     }
                 }
-            }.frame(minHeight: 140, maxHeight: 300)
+            }.frame(height: 210)
             HStack {
                 Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Create PDF", action: create).keyboardShortcut(.defaultAction)
             }
-        }.padding(20).frame(width: 500)
+        }.padding(20).frame(width: 500, height: 400)
     }
 }
 
@@ -467,7 +481,8 @@ class RadialView: NSView {
     override func draggingExited(_ sender: NSDraggingInfo?) { selected = -1; needsDisplay = true }
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { selected >= 0 }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard selected >= 0, let files = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !files.isEmpty else { return false }
+        let files = draggedFileURLs(from: sender.draggingPasteboard)
+        guard selected >= 0, !files.isEmpty else { return false }
         guard files.count == 1 || (actions[selected] == "pdf" && files.allSatisfy(isImageFile)) else { return false }
         onDrop?(files, actions[selected]); return true
     }
@@ -585,8 +600,17 @@ final class ConversionPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+struct DragSessionGate {
+    var baseline: Int
+    mutating func accepts(mouseDown: Bool, shift: Bool, changeCount: Int) -> Bool {
+        if !mouseDown { baseline = changeCount; return false }
+        return shift && changeCount != baseline
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var preferences = UserDefaults.standard
+    var dragGate = DragSessionGate(baseline: NSPasteboard(name: .drag).changeCount)
     var status: NSStatusItem!; var panel: NSPanel!; var radial: RadialView!; var timer: Timer?; var windows: [NSWindow] = []; var welcome: NSWindow?
     var conversionPanel: NSPanel?; let conversions = ConversionCenter()
     let conversionQueue: OperationQueue = { let queue = OperationQueue(); queue.name = "FileHalo.Conversions"; queue.maxConcurrentOperationCount = 2; queue.qualityOfService = .userInitiated; return queue }()
@@ -602,7 +626,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel = NSPanel(contentRect: NSRect(x: 0,y: 0,width: 248,height: 248), styleMask: [.borderless,.nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "FileHalo Wheel"
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.level = .popUpMenu; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]; panel.hidesOnDeactivate = false
-        radial = RadialView(frame: NSRect(x: 0,y: 0,width: 248,height: 248)); radial.onDrop = { [weak self] u,a in self?.panel.orderOut(nil); self?.manual = false; self?.perform(u,a) }; panel.contentView = glassHost(radial,cornerRadius:124)
+        radial = RadialView(frame: NSRect(x: 0,y: 0,width: 248,height: 248)); radial.onDrop = { [weak self] u,a in
+            self?.dragGate.baseline = NSPasteboard(name: .drag).changeCount
+            self?.panel.orderOut(nil); self?.manual = false; self?.perform(u,a)
+        }; panel.contentView = glassHost(radial,cornerRadius:124)
         timer = Timer(timeInterval: 0.045, repeats: true) { [weak self] _ in self?.tick() }
         if let timer {
             RunLoop.main.add(timer, forMode: .common)
@@ -682,9 +709,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         let dragging = NSEvent.pressedMouseButtons & 1 != 0, shift = NSEvent.modifierFlags.contains(.shift)
-        if dragging && shift {
-            let pb = NSPasteboard(name: .drag)
-            if let files = pb.readObjects(forClasses: [NSURL.self],options: [.urlReadingFileURLsOnly: true]) as? [URL], let u = files.first {
+        let pb = NSPasteboard(name: .drag)
+        if dragGate.accepts(mouseDown: dragging, shift: shift, changeCount: pb.changeCount) {
+            let files = draggedFileURLs(from: pb)
+            if let u = files.first {
                 if !shiftTracking { shiftTracking = true; current = u }
                 let desired = selectionFormats(files)
                 if desired.isEmpty { panel.orderOut(nil); return }
@@ -787,12 +815,15 @@ if CommandLine.arguments.contains("--self-test") {
         guard rejectedInvalidInput, !FileManager.default.fileExists(atPath: dir.appendingPathComponent("damaged.jpg").path) else { throw failure("Invalid input was accepted or left a partial output") }
         print("PASS failed output cleanup")
         var orderedImages: [URL] = []
-        for (name, size) in [("z-first", NSSize(width: 200, height: 200)), ("m-second", NSSize(width: 100, height: 200)), ("a-third", NSSize(width: 300, height: 100))] {
+        for (name, size) in [("z-first.jpg", NSSize(width: 200, height: 200)), ("m-second.png", NSSize(width: 100, height: 200)), ("a-third.heic", NSSize(width: 300, height: 100))] {
             let fixture = NSImage(size: size)
             fixture.lockFocus(); NSColor.white.setFill(); NSRect(origin: .zero, size: size).fill(); fixture.unlockFocus()
-            let url = dir.appendingPathComponent(name).appendingPathExtension("png")
+            let url = dir.appendingPathComponent(name)
             try saveImage(fixture, to: url); orderedImages.append(url)
         }
+        let testPasteboard = NSPasteboard.withUniqueName()
+        defer { testPasteboard.releaseGlobally() }
+        guard testPasteboard.writeObjects(orderedImages.map { $0 as NSURL }), draggedFileURLs(from: testPasteboard) == orderedImages else { throw failure("Three-image drag selection was truncated or reordered") }
         let combinedOutput = try convertImagesToPDF(orderedImages)
         guard let combinedURL = combinedOutput.first, let combinedPDF = PDFDocument(url: combinedURL), combinedPDF.pageCount == 3 else { throw failure("Combined PDF page count") }
         for (index, ratio) in [1.0, 0.5, 3.0].enumerated() {
@@ -838,6 +869,14 @@ if CommandLine.arguments.contains("--self-test") {
         _ = RunLoop.main.run(mode: .eventTracking, before: Date(timeIntervalSinceNow: 0.1))
         guard trackingTimerFired.get() == 1 else { throw failure("Shift-drag polling timer paused in event-tracking mode") }
         print("PASS drag-tracking wheel timer")
+        var dragGate = DragSessionGate(baseline: 10)
+        guard !dragGate.accepts(mouseDown: true, shift: true, changeCount: 10),
+              dragGate.accepts(mouseDown: true, shift: true, changeCount: 11),
+              !dragGate.accepts(mouseDown: false, shift: true, changeCount: 11),
+              !dragGate.accepts(mouseDown: true, shift: true, changeCount: 11),
+              !dragGate.accepts(mouseDown: true, shift: false, changeCount: 12),
+              dragGate.accepts(mouseDown: true, shift: true, changeCount: 12) else { throw failure("Wheel accepted a stale drag selection or missed a new drag") }
+        print("PASS fresh drag selection gate")
         let windowDelegate = AppDelegate()
         let preferenceDomain = "FileHalo.WindowTests.\(UUID().uuidString)"
         guard let testPreferences = UserDefaults(suiteName: preferenceDomain) else { throw failure("Window test preferences") }

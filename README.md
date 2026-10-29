@@ -22,7 +22,7 @@ You can also use the FileHalo menu-bar icon → **Choose File…**, then click a
 - Native macOS Liquid Glass materials for the wheel and editor windows; follows system light/dark appearance. Neutral gray selection accents.
 - Image export: JPG, PNG, WebP, HEIC, TIFF, AVIF, BMP, PDF.
 - PDF to JPG/PNG exports every page, with a separate file per page.
-- Select multiple images, Shift-drag onto PDF, review/reorder the pages, then choose Create PDF to save one multipage document beside the first image. Finder may send files in display order rather than click-selection order; the preview lets you set the exact page order.
+- Select multiple images, Shift-drag onto PDF, check the image/page count and review/reorder the pages, then choose Create PDF to save one multipage document beside the first image. Finder may send files in display order rather than click-selection order; the preview lets you set the exact page order.
 - PDF/text documents to TXT and DOCX. On-device Vision OCR provides text extraction for scanned PDFs.
 - Crop with draggable corners and precise sliders.
 - Background styling with colors, gradients, padding, rounded corners, and shadows.
@@ -42,7 +42,7 @@ The free direct-download release is ad-hoc signed and not Apple-notarized. macOS
 
 ## Verification
 
-Built with the installed Xcode Swift compiler for Apple silicon, macOS 14+. Automated checks cover eight image output formats (including bundled WebP and AVIF encoders), concurrent filename reservations, failed-output cleanup, multipage PDF output, ordered multi-image PDF creation and reordering, image-only multiselection validation, DOCX text round-trip, MP4/WebM/WAV/MP3 conversion, six editor rendering paths, crop pixel dimensions, radial hit testing, drag-tracking timer execution, one-time onboarding, and conversion-panel close/reopen behavior. The global Shift-drag interaction is implemented but has not been verified end-to-end through UI automation.
+Built with the installed Xcode Swift compiler for Apple silicon, macOS 14+. Automated checks cover eight image output formats (including bundled WebP and AVIF encoders), concurrent filename reservations, failed-output cleanup, multipage PDF output, ordered multi-image PDF creation and reordering, image-only multiselection validation, DOCX text round-trip, MP4/WebM/WAV/MP3 conversion, six editor rendering paths, crop pixel dimensions, radial hit testing, drag-tracking timer execution, fresh-drag gating that rejects stale selections, three-file pasteboard decoding, one-time onboarding, and conversion-panel close/reopen behavior. The global Shift-drag interaction is implemented but has not been verified end-to-end through UI automation.
 
 ## Rebuild
 
