@@ -30,6 +30,7 @@ You can also use the FileHalo menu-bar icon → **Choose File…**, then click a
 - Image adjustments: brightness, contrast, saturation, quarter-turn rotation.
 - File and image metadata viewer.
 - Audio/video conversions using this Mac’s FFmpeg installation.
+- A floating conversion panel lists every queued and active conversion; FFmpeg jobs show live progress, and up to two conversions can run at once. Reopen it from the menu bar when needed.
 - Local processing, no network services, and original files preserved.
 
 ## Scope and current limits

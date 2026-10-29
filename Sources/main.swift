@@ -6,6 +6,8 @@ import ImageIO
 import CoreImage
 import Vision
 import ServiceManagement
+import AVFoundation
+import CoreText
 
 let accent = NSColor.systemGray
 let appName = "FileHalo"
@@ -63,19 +65,82 @@ func textFrom(_ u: URL) throws -> String {
     if ["docx", "doc", "rtf", "html", "odt"].contains(u.pathExtension.lowercased()) { return try NSAttributedString(url: u, options: [:], documentAttributes: nil).string }
     return try String(contentsOf: u, encoding: .utf8)
 }
+func writeTextPDF(_ text: String, to url: URL) throws {
+    var mediaBox = CGRect(x: 0, y: 0, width: 540, height: 720)
+    guard let consumer = CGDataConsumer(url: url as CFURL), let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { throw failure("Could not create PDF.") }
+    let font = CTFontCreateWithName("Helvetica" as CFString, 12, nil)
+    let attributed = NSAttributedString(string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font])
+    let framesetter = CTFramesetterCreateWithAttributedString(attributed)
+    var location = 0
+    while location < attributed.length {
+        context.beginPDFPage(nil)
+        let path = CGPath(rect: CGRect(x: 24, y: 24, width: 492, height: 672), transform: nil)
+        let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: location, length: 0), path, nil)
+        CTFrameDraw(frame, context)
+        let visible = CTFrameGetVisibleStringRange(frame)
+        guard visible.length > 0 else { context.endPDFPage(); throw failure("Could not lay out the text as PDF.") }
+        location = visible.location + visible.length
+        context.endPDFPage()
+    }
+    if attributed.length == 0 { context.beginPDFPage(nil); context.endPDFPage() }
+    context.closePDF()
+}
 func bundledTool(_ name: String) -> String? {
     if let bundled = Bundle.main.resourceURL?.appendingPathComponent("Tools/\(name)"), FileManager.default.isExecutableFile(atPath:bundled.path) { return bundled.path }
     let paths = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"]
     return paths.first(where: { FileManager.default.isExecutableFile(atPath:$0) })
 }
-func runFFmpeg(_ args: [String]) throws {
-    guard let path = bundledTool("ffmpeg") else { throw failure("FFmpeg is missing from this download. Re-download FileHalo from its website.") }
-    let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = ["-nostdin", "-v", "error", "-n"] + args
-    let pipe = Pipe(); process.standardError = pipe; process.standardOutput = FileHandle.nullDevice
-    try process.run(); let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-    guard process.terminationStatus == 0 else { throw failure(String(data: data, encoding: .utf8) ?? "Conversion failed") }
+final class LockedDouble: @unchecked Sendable {
+    private let lock = NSLock(); private var storage: Double?
+    func set(_ value: Double?) { lock.withLock { storage = value } }
+    func get() -> Double? { lock.withLock { storage } }
 }
-func convert(_ u: URL, to ext: String) throws -> [URL] {
+func mediaDuration(_ url: URL) -> Double? {
+    let asset = AVURLAsset(url: url), semaphore = DispatchSemaphore(value: 0), seconds = LockedDouble()
+    Task.detached(priority: .utility) {
+        let value = try? await asset.load(.duration).seconds
+        seconds.set(value); semaphore.signal()
+    }
+    semaphore.wait(); let value = seconds.get()
+    guard let value, value.isFinite, value > 0 else { return nil }
+    return value
+}
+func runFFmpeg(_ args: [String], duration: Double? = nil, progress: ((Double) -> Void)? = nil) throws {
+    guard let path = bundledTool("ffmpeg") else { throw failure("FFmpeg is missing from this download. Re-download FileHalo from its website.") }
+    let process = Process(); process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = ["-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats", "-n"] + args
+    let output = Pipe(), errors = Pipe(); process.standardOutput = output; process.standardError = errors
+    let outputHandle = output.fileHandleForReading, parseLock = NSLock(); var pending = Data()
+    outputHandle.readabilityHandler = { handle in
+        let data = handle.availableData
+        if data.isEmpty { handle.readabilityHandler = nil; return }
+        parseLock.lock(); pending.append(data)
+        while let newline = pending.firstIndex(of: 10) {
+            let lineData = pending.prefix(upTo: newline); pending.removeSubrange(...newline)
+            guard let line = String(data: lineData, encoding: .utf8), let split = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<split]), value = String(line[line.index(after: split)...])
+            if key == "out_time_us", let micros = Double(value), let duration, duration > 0 {
+                progress?(min(0.99, max(0, micros / (duration * 1_000_000))))
+            } else if key == "progress", value == "end" { progress?(1) }
+        }
+        parseLock.unlock()
+    }
+    try process.run()
+    let errorLock = NSLock(); var errorData = Data(); let errorGroup = DispatchGroup(); errorGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+        let data = errors.fileHandleForReading.readDataToEndOfFile()
+        errorLock.lock(); errorData = data; errorLock.unlock(); errorGroup.leave()
+    }
+    process.waitUntilExit()
+    outputHandle.readabilityHandler = nil
+    _ = outputHandle.readDataToEndOfFile()
+    errorGroup.wait(); errorLock.lock(); let data = errorData; errorLock.unlock()
+    guard process.terminationStatus == 0 else {
+        let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        throw failure(message?.isEmpty == false ? message! : "Conversion failed")
+    }
+}
+func convert(_ u: URL, to ext: String, progress: ((Double) -> Void)? = nil) throws -> [URL] {
     let out = uniqueURL(u, "", ext)
     let input = u.pathExtension.lowercased()
     if ["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg"].contains(input) {
@@ -83,7 +148,9 @@ func convert(_ u: URL, to ext: String) throws -> [URL] {
         if ["mp3", "wav", "m4a", "flac", "ogg"].contains(ext) { args += ["-vn"] }
         if ext == "webm" { args += ["-c:v", "libsvtav1", "-c:a", "libopus"] }
         if ext == "mp4" { args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"] }
-        args += [out.path]; try runFFmpeg(args); return [out]
+        args += [out.path]
+        try runFFmpeg(args, duration: mediaDuration(u), progress: progress)
+        return [out]
     }
     if ext == "txt" || ext == "docx" {
         let t = try textFrom(u)
@@ -106,9 +173,7 @@ func convert(_ u: URL, to ext: String) throws -> [URL] {
     }
     if ext == "pdf", ["txt", "docx", "rtf", "html"].contains(input) {
         let text = try textFrom(u)
-        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 540, height: 720))
-        view.string = text; view.font = NSFont.systemFont(ofSize: 12); view.textContainerInset = NSSize(width: 24, height: 24)
-        view.sizeToFit(); try view.dataWithPDF(inside: view.bounds).write(to: out); return [out]
+        try writeTextPDF(text, to: out); return [out]
     }
     if ext == "webp" {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("png")
@@ -135,6 +200,121 @@ func glassHost(_ content: NSView, cornerRadius: CGFloat = 24) -> NSView {
     effect.wantsLayer = true; effect.layer?.cornerRadius = cornerRadius; effect.layer?.masksToBounds = true
     content.autoresizingMask = [.width,.height]; effect.addSubview(content)
     return effect
+}
+
+struct ConversionJob: Identifiable {
+    let id: UUID
+    let filename: String
+    let target: String
+    var progress: Double?
+    var status: String
+    var isComplete = false
+    var error: String?
+    var outputs: [URL] = []
+}
+
+final class ConversionCenter: ObservableObject {
+    @Published private(set) var jobs: [ConversionJob] = []
+    var activeCount: Int { jobs.filter { !$0.isComplete }.count }
+
+    func add(_ job: ConversionJob) {
+        let action = {
+            let finished = self.jobs.filter(\.isComplete)
+            if finished.count > 8 {
+                let removeIDs = Set(finished.prefix(finished.count - 8).map(\.id))
+                self.jobs.removeAll { removeIDs.contains($0.id) }
+            }
+            self.jobs.append(job)
+        }
+        if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+    }
+
+    func update(_ id: UUID, progress: Double?, status: String) {
+        let action = {
+            guard let index = self.jobs.firstIndex(where: { $0.id == id }), !self.jobs[index].isComplete else { return }
+            self.jobs[index].progress = progress
+            self.jobs[index].status = status
+        }
+        if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+    }
+
+    func finish(_ id: UUID, result: Result<[URL], Error>) {
+        let action = {
+            guard let index = self.jobs.firstIndex(where: { $0.id == id }) else { return }
+            self.jobs[index].isComplete = true
+            switch result {
+            case .success(let files): self.jobs[index].outputs = files; self.jobs[index].progress = 1; self.jobs[index].status = "Complete"
+            case .failure(let error): self.jobs[index].error = error.localizedDescription; self.jobs[index].status = "Couldn’t convert"
+            }
+        }
+        if Thread.isMainThread { action() } else { DispatchQueue.main.async(execute: action) }
+    }
+}
+
+struct ConversionProgressView: View {
+    @ObservedObject var center: ConversionCenter
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Conversions", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                if center.activeCount > 0 {
+                    Text("\(center.activeCount) jobs")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if center.jobs.isEmpty {
+                Text("Your conversions will appear here while FileHalo works.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(center.jobs.reversed()) { job in conversionRow(job) }
+                    }
+                }
+                .frame(maxHeight: 390)
+            }
+        }
+        .padding(18)
+        .frame(width: 410, alignment: .topLeading)
+        .background(Color.clear)
+    }
+
+    @ViewBuilder private func conversionRow(_ job: ConversionJob) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
+                Image(systemName: job.error == nil ? (job.isComplete ? "checkmark.circle.fill" : "doc") : "exclamationmark.circle.fill")
+                    .foregroundStyle(job.error == nil ? (job.isComplete ? Color.green : Color.secondary) : Color.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(job.filename).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    Text(job.error ?? "To \(job.target.uppercased()) · \(job.status)")
+                        .font(.system(size: 11)).foregroundStyle(job.error == nil ? Color.secondary : Color.red).lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                if !job.outputs.isEmpty {
+                    Button("Show") { NSWorkspace.shared.activateFileViewerSelecting(job.outputs) }
+                        .font(.system(size: 11, weight: .medium)).buttonStyle(.borderless)
+                }
+            }
+            if !job.isComplete && job.error == nil {
+                HStack(spacing: 8) {
+                    if let progress = job.progress {
+                        ProgressView(value: progress).progressViewStyle(.linear)
+                        Text("\(Int(progress * 100))%")
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+                    } else {
+                        ProgressView().progressViewStyle(.linear)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1) }
+    }
 }
 
 class RadialView: NSView {
@@ -297,7 +477,9 @@ struct Editor: View {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var status: NSStatusItem!; var panel: NSPanel!; var radial: RadialView!; var timer: Timer?; var windows: [NSWindow] = []; var welcome: NSWindow?
-    var lastChange = -1; var current: URL?; var shiftStart: Date?; var manual = false; var busy = false
+    var conversionPanel: NSPanel?; let conversions = ConversionCenter()
+    let conversionQueue: OperationQueue = { let queue = OperationQueue(); queue.name = "FileHalo.Conversions"; queue.maxConcurrentOperationCount = 2; queue.qualityOfService = .userInitiated; return queue }()
+    var current: URL?; var shiftStart: Date?; var manual = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         // Follow the system appearance, including dark mode.
@@ -305,7 +487,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "circle.hexagongrid.fill", accessibilityDescription: appName); status.button?.contentTintColor = accent
         let menu = NSMenu(); menu.addItem(withTitle: "FileHalo — File tools", action: nil, keyEquivalent: "")
-        menu.addItem(item("Choose File…", #selector(choose), "o")); menu.addItem(item("How to Use", #selector(showWelcome), "")); menu.addItem(.separator()); menu.addItem(item("Quit FileHalo", #selector(quit), "q")); status.menu = menu
+        menu.addItem(item("Choose File…", #selector(choose), "o")); menu.addItem(item("Conversion Progress…", #selector(showConversions), "")); menu.addItem(item("How to Use", #selector(showWelcome), "")); menu.addItem(.separator()); menu.addItem(item("Quit FileHalo", #selector(quit), "q")); status.menu = menu
         panel = NSPanel(contentRect: NSRect(x: 0,y: 0,width: 248,height: 248), styleMask: [.borderless,.nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "FileHalo Wheel"
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.level = .popUpMenu; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]; panel.hidesOnDeactivate = false
@@ -326,6 +508,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func item(_ title: String,_ action: Selector,_ key: String) -> NSMenuItem { let i = NSMenuItem(title: title,action: action,keyEquivalent: key); i.target = self; return i }
     @objc func quit() { NSApp.terminate(nil) }
+    @objc func showConversions() { presentConversions() }
+    func presentConversions() {
+        if conversionPanel == nil {
+            let view = ConversionProgressView(center: conversions)
+            let w = NSPanel(contentRect: NSRect(x: 0,y: 0,width: 450,height: 340), styleMask: [.titled,.closable,.utilityWindow,.nonactivatingPanel], backing: .buffered, defer: false)
+            w.title = "FileHalo Conversions"; w.isReleasedWhenClosed = false; w.isOpaque = false; w.backgroundColor = .clear
+            w.titlebarAppearsTransparent = true; w.level = .floating; w.hidesOnDeactivate = false
+            w.contentView = glassHost(NSHostingView(rootView: view), cornerRadius: 18); w.center(); conversionPanel = w
+        }
+        conversionPanel?.orderFrontRegardless()
+    }
     @objc func showWelcome() {
         if let welcome { welcome.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
         let view = VStack(alignment: .leading, spacing: 20) {
@@ -354,7 +547,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !panel.isVisible { panel.setFrameOrigin(NSPoint(x: x,y: y)) }; panel.orderFrontRegardless()
     }
     func tick() {
-        guard !busy else { return }
         let dragging = NSEvent.pressedMouseButtons & 1 != 0, shift = NSEvent.modifierFlags.contains(.shift)
         if dragging && shift {
             let pb = NSPasteboard(name: .drag)
@@ -385,13 +577,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if ["Crop","Add BG","Redact","Annotate","Compress","Edit"].contains(action) {
             do { let m = EditModel(source: u,image: try loadImage(u),mode: action); m.onSave = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }; let w = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 460,height: 690),styleMask: [.titled,.closable,.resizable],backing: .buffered,defer: false); w.titlebarAppearsTransparent = true; w.isOpaque = false; w.backgroundColor = .clear; w.title = action; w.contentView = glassHost(NSHostingView(rootView: Editor(m: m))); present(w) } catch { report(error.localizedDescription,error: true) }; return
         }
-        busy = true; status.button?.title = "…"
-        // AppKit document conversion stays on the main thread; FFmpeg and raster exports use a worker.
-        let work = {
-            let result = Result { try convert(u,to: action) }
-            DispatchQueue.main.async { self.busy = false; self.status.button?.title = ""; switch result { case .success(let files): NSWorkspace.shared.activateFileViewerSelecting(files); case .failure(let error): self.report(error.localizedDescription,error: true) } }
+        let id = UUID()
+        conversions.add(ConversionJob(id: id, filename: u.lastPathComponent, target: action, progress: nil, status: "Queued"))
+        presentConversions()
+        conversionQueue.addOperation { [conversions] in
+            conversions.update(id, progress: nil, status: "Working…")
+            let result = Result { try convert(u, to: action, progress: { value in
+                conversions.update(id, progress: value, status: "Converting · \(Int(value * 100))%")
+            }) }
+            conversions.finish(id, result: result)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, conversions] in
+                if conversions.activeCount == 0 { self?.conversionPanel?.orderOut(nil) }
+            }
         }
-        if ["docx","txt","pdf"].contains(action) { work() } else { DispatchQueue.global(qos: .userInitiated).async(execute: work) }
     }
     func present(_ w: NSWindow) { w.isReleasedWhenClosed = false; windows.append(w); w.center(); w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
 }
