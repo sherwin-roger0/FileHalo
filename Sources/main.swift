@@ -224,6 +224,72 @@ func convert(_ u: URL, to ext: String, progress: ((Double) -> Void)? = nil) thro
     try saveImage(loadImage(u), to: out); keepOutput = true; return [out]
 }
 
+func isImageFile(_ url: URL) -> Bool {
+    UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
+}
+
+func convertImagesToPDF(_ images: [URL], progress: ((Double) -> Void)? = nil) throws -> [URL] {
+    guard images.count > 1, images.allSatisfy(isImageFile), let first = images.first else {
+        throw failure("Multiple selection is supported only for images combined into a PDF.")
+    }
+    let reservation = try reserveUniqueURL(first, " Combined", "pdf")
+    var complete = false
+    defer {
+        try? FileManager.default.removeItem(at: reservation.marker)
+        if !complete { try? FileManager.default.removeItem(at: reservation.url) }
+    }
+    let document = PDFDocument()
+    for (index, url) in images.enumerated() {
+        guard let page = PDFPage(image: try loadImage(url)) else { throw failure("Could not create a PDF page for \(url.lastPathComponent).") }
+        document.insert(page, at: index)
+        progress?(Double(index + 1) / Double(images.count) * 0.95)
+    }
+    guard document.write(to: reservation.url) else { throw failure("Could not save the combined PDF.") }
+    complete = true
+    progress?(1)
+    return [reservation.url]
+}
+
+final class PDFPageOrder: ObservableObject {
+    @Published var images: [URL]
+    init(_ images: [URL]) { self.images = images }
+    func move(_ index: Int, by offset: Int) {
+        let destination = index + offset
+        guard images.indices.contains(index), images.indices.contains(destination) else { return }
+        images.swapAt(index, destination)
+    }
+}
+
+struct PDFPageOrderView: View {
+    @ObservedObject var order: PDFPageOrder
+    let create: () -> Void
+    let cancel: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Combine images into PDF").font(.title2)
+            Text("Check the page order below. Finder may send files in its display order rather than the order you clicked them.").font(.callout).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(Array(order.images.enumerated()), id: \.offset) { index, url in
+                        HStack {
+                            Text("\(index + 1)").monospacedDigit().frame(width: 30)
+                            Text(url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button { order.move(index, by: -1) } label: { Image(systemName: "arrow.up") }.disabled(index == 0).accessibilityLabel("Move page \(index + 1) up")
+                            Button { order.move(index, by: 1) } label: { Image(systemName: "arrow.down") }.disabled(index == order.images.count - 1).accessibilityLabel("Move page \(index + 1) down")
+                        }.padding(8)
+                    }
+                }
+            }.frame(minHeight: 140, maxHeight: 300)
+            HStack {
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Create PDF", action: create).keyboardShortcut(.defaultAction)
+            }
+        }.padding(20).frame(width: 500)
+    }
+}
+
 func glassHost(_ content: NSView, cornerRadius: CGFloat = 24) -> NSView {
     if #available(macOS 26.0, *) {
         let glass = NSGlassEffectView(frame:content.frame)
@@ -357,7 +423,7 @@ struct ConversionProgressView: View {
 
 class RadialView: NSView {
     var file: URL?; var actions: [String] = []; var selected = -1
-    var onDrop: ((URL, String) -> Void)?
+    var onDrop: (([URL], String) -> Void)?
     override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL]); wantsLayer = true }
     required init?(coder: NSCoder) { fatalError() }
     override var isOpaque: Bool { false }
@@ -401,11 +467,12 @@ class RadialView: NSView {
     override func draggingExited(_ sender: NSDraggingInfo?) { selected = -1; needsDisplay = true }
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { selected >= 0 }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard selected >= 0, let u = (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first else { return false }
-        onDrop?(u, actions[selected]); return true
+        guard selected >= 0, let files = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !files.isEmpty else { return false }
+        guard files.count == 1 || (actions[selected] == "pdf" && files.allSatisfy(isImageFile)) else { return false }
+        onDrop?(files, actions[selected]); return true
     }
     override func mouseDown(with event: NSEvent) {
-        let i = index(convert(event.locationInWindow, from: nil)); if i >= 0, let file { onDrop?(file, actions[i]) }
+        let i = index(convert(event.locationInWindow, from: nil)); if i >= 0, let file { onDrop?([file], actions[i]) }
     }
 }
 
@@ -599,9 +666,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if ["txt","docx","rtf","html","odt","doc"].contains(ext) { return ["pdf","txt","docx"] }
         return ["jpg","png","webp","heic","tiff","avif","bmp","pdf","Tools"]
     }
-    func display(_ u: URL, tools: Bool) {
+    func selectionFormats(_ files: [URL]) -> [String] {
+        guard let first = files.first else { return [] }
+        if files.count > 1 { return files.allSatisfy(isImageFile) ? ["pdf"] : [] }
+        return formats(first)
+    }
+    func display(_ u: URL, tools: Bool, selection: [URL]? = nil) {
         dismissWelcome()
-        radial.file = u; radial.actions = tools ? ["Compress","Metadata","Edit","Annotate","Add BG","Crop","Redact","Formats"] : formats(u); radial.selected = -1; radial.needsDisplay = true
+        let files = selection ?? [u]
+        radial.file = files.count == 1 ? u : nil
+        radial.actions = tools ? ["Compress","Metadata","Edit","Annotate","Add BG","Crop","Redact","Formats"] : selectionFormats(files); radial.selected = -1; radial.needsDisplay = true
         let p = NSEvent.mouseLocation; let screen = NSScreen.screens.first(where: { $0.frame.contains(p) })?.visibleFrame ?? NSScreen.main!.visibleFrame
         let x = max(screen.minX,min(p.x-124,screen.maxX-248)), y = max(screen.minY,min(p.y-124,screen.maxY-248))
         if !panel.isVisible { panel.setFrameOrigin(NSPoint(x: x,y: y)) }; panel.orderFrontRegardless()
@@ -610,10 +684,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let dragging = NSEvent.pressedMouseButtons & 1 != 0, shift = NSEvent.modifierFlags.contains(.shift)
         if dragging && shift {
             let pb = NSPasteboard(name: .drag)
-            if let u = (pb.readObjects(forClasses: [NSURL.self],options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first {
+            if let files = pb.readObjects(forClasses: [NSURL.self],options: [.urlReadingFileURLsOnly: true]) as? [URL], let u = files.first {
                 if !shiftTracking { shiftTracking = true; current = u }
-                let desired = formats(u)
-                if !panel.isVisible || radial.actions != desired { display(u,tools: false) }
+                let desired = selectionFormats(files)
+                if desired.isEmpty { panel.orderOut(nil); return }
+                if !panel.isVisible || radial.actions != desired { display(u,tools: false,selection:files) }
             }
         } else {
             shiftTracking = false
@@ -623,6 +698,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func report(_ s: String, error: Bool = false) {
         NSApp.activate(ignoringOtherApps: true); let a = NSAlert(); a.messageText = error ? "Couldn’t complete that" : "Saved successfully"; a.informativeText = s; a.alertStyle = error ? .warning : .informational; a.runModal()
+    }
+    func perform(_ files: [URL],_ action: String) {
+        guard let first = files.first else { return }
+        guard files.count > 1 else { perform(first, action); return }
+        guard action == "pdf", files.allSatisfy(isImageFile) else {
+            report("Multiple selection is supported only for images combined into a PDF.", error: true)
+            return
+        }
+        dismissWelcome()
+        let order = PDFPageOrder(files)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 420), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "PDF Page Order"; window.isRestorable = false
+        window.contentView = NSHostingView(rootView: PDFPageOrderView(order: order, create: { [weak self, weak window] in
+            window?.close()
+            self?.enqueueConversion(order.images, to: "pdf")
+        }, cancel: { [weak window] in window?.close() }))
+        present(window)
     }
     func perform(_ u: URL,_ action: String) {
         dismissWelcome()
@@ -636,14 +728,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if ["Crop","Add BG","Redact","Annotate","Compress","Edit"].contains(action) {
             do { let m = EditModel(source: u,image: try loadImage(u),mode: action); m.onSave = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }; let w = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 460,height: 690),styleMask: [.titled,.closable,.resizable],backing: .buffered,defer: false); w.titlebarAppearsTransparent = true; w.isOpaque = false; w.backgroundColor = .clear; w.title = action; w.contentView = glassHost(NSHostingView(rootView: Editor(m: m))); present(w) } catch { report(error.localizedDescription,error: true) }; return
         }
+        enqueueConversion([u], to: action)
+    }
+    func enqueueConversion(_ files: [URL], to action: String) {
+        guard let u = files.first else { return }
         let id = UUID()
-        conversions.add(ConversionJob(id: id, filename: u.lastPathComponent, target: action, progress: nil, status: "Queued"))
+        conversions.add(ConversionJob(id: id, filename: files.count > 1 ? "\(files.count) images · \(u.lastPathComponent)" : u.lastPathComponent, target: action, progress: nil, status: "Queued"))
         presentConversions()
         conversionQueue.addOperation { [conversions] in
             conversions.update(id, progress: nil, status: "Working…")
-            let result = Result { try convert(u, to: action, progress: { value in
+            let result = Result { () throws -> [URL] in
+                let progress: (Double) -> Void = { value in
                 conversions.update(id, progress: value, status: "Converting · \(Int(value * 100))%")
-            }) }
+                }
+                if files.count > 1 {
+                    guard action == "pdf" else { throw failure("Multiple images can only be combined into PDF.") }
+                    return try convertImagesToPDF(files, progress: progress)
+                }
+                return try convert(u, to: action, progress: progress)
+            }
             conversions.finish(id, result: result)
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, conversions] in
                 if conversions.activeCount == 0 { self?.conversionPanel?.orderOut(nil) }
@@ -683,6 +786,27 @@ if CommandLine.arguments.contains("--self-test") {
         do { _ = try convert(damaged, to: "jpg") } catch { rejectedInvalidInput = true }
         guard rejectedInvalidInput, !FileManager.default.fileExists(atPath: dir.appendingPathComponent("damaged.jpg").path) else { throw failure("Invalid input was accepted or left a partial output") }
         print("PASS failed output cleanup")
+        var orderedImages: [URL] = []
+        for (name, size) in [("z-first", NSSize(width: 200, height: 200)), ("m-second", NSSize(width: 100, height: 200)), ("a-third", NSSize(width: 300, height: 100))] {
+            let fixture = NSImage(size: size)
+            fixture.lockFocus(); NSColor.white.setFill(); NSRect(origin: .zero, size: size).fill(); fixture.unlockFocus()
+            let url = dir.appendingPathComponent(name).appendingPathExtension("png")
+            try saveImage(fixture, to: url); orderedImages.append(url)
+        }
+        let combinedOutput = try convertImagesToPDF(orderedImages)
+        guard let combinedURL = combinedOutput.first, let combinedPDF = PDFDocument(url: combinedURL), combinedPDF.pageCount == 3 else { throw failure("Combined PDF page count") }
+        for (index, ratio) in [1.0, 0.5, 3.0].enumerated() {
+            guard let bounds = combinedPDF.page(at: index)?.bounds(for: .mediaBox), abs(bounds.width / bounds.height - ratio) < 0.01 else { throw failure("Combined PDF changed page order") }
+        }
+        let pageOrder = PDFPageOrder(orderedImages); pageOrder.move(2, by: -1)
+        guard pageOrder.images == [orderedImages[0], orderedImages[2], orderedImages[1]] else { throw failure("Page order controls") }
+        let selectionDelegate = AppDelegate()
+        guard selectionDelegate.selectionFormats(orderedImages) == ["pdf"], selectionDelegate.selectionFormats([orderedImages[0], combinedURL]).isEmpty else { throw failure("Multiple selection exposed unsupported formats") }
+        let filesBeforeFailure = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        var rejectedDamagedImage = false
+        do { _ = try convertImagesToPDF([source, damaged]) } catch { rejectedDamagedImage = true }
+        guard rejectedDamagedImage, Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)) == filesBeforeFailure else { throw failure("Combined PDF failure left output or reservation") }
+        print("PASS ordered multi-image PDF, reorder controls, and image-only selection")
         let doc = PDFDocument(); doc.insert(PDFPage(image:image)!,at:0); doc.insert(PDFPage(image:image)!,at:1); let pdf = dir.appendingPathComponent("pages.pdf"); guard doc.write(to:pdf) else { throw failure("PDF fixture") }; let pages = try convert(pdf,to:"png"); guard pages.count == 2 else { throw failure("Missing PDF pages") }; print("PASS multipage PDF")
         let txt = dir.appendingPathComponent("text.txt"); try "FileHalo conversion test\nHello from the Mac.".write(to:txt,atomically:true,encoding:.utf8)
         let word = try convert(txt,to:"docx")[0]; guard try textFrom(word).contains("Hello from the Mac") else { throw failure("DOCX roundtrip") }; print("PASS DOCX roundtrip")
