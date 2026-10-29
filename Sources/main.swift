@@ -513,7 +513,13 @@ struct Editor: View {
     }
 }
 
+final class ConversionPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
+    var preferences = UserDefaults.standard
     var status: NSStatusItem!; var panel: NSPanel!; var radial: RadialView!; var timer: Timer?; var windows: [NSWindow] = []; var welcome: NSWindow?
     var conversionPanel: NSPanel?; let conversions = ConversionCenter()
     let conversionQueue: OperationQueue = { let queue = OperationQueue(); queue.name = "FileHalo.Conversions"; queue.maxConcurrentOperationCount = 2; queue.qualityOfService = .userInitiated; return queue }()
@@ -525,16 +531,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "circle.hexagongrid.fill", accessibilityDescription: appName); status.button?.contentTintColor = accent
         let menu = NSMenu(); menu.addItem(withTitle: "FileHalo — File tools", action: nil, keyEquivalent: "")
-        menu.addItem(item("Choose File…", #selector(choose), "o")); menu.addItem(item("Conversion Progress…", #selector(showConversions), "")); menu.addItem(item("How to Use", #selector(showWelcome), "")); menu.addItem(.separator()); menu.addItem(item("Quit FileHalo", #selector(quit), "q")); status.menu = menu
+        menu.addItem(item("Choose File…", #selector(choose), "o")); menu.addItem(item("Conversion Progress…", #selector(showConversions), "")); menu.addItem(.separator()); menu.addItem(item("Quit FileHalo", #selector(quit), "q")); status.menu = menu
         panel = NSPanel(contentRect: NSRect(x: 0,y: 0,width: 248,height: 248), styleMask: [.borderless,.nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "FileHalo Wheel"
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.level = .popUpMenu; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]; panel.hidesOnDeactivate = false
         radial = RadialView(frame: NSRect(x: 0,y: 0,width: 248,height: 248)); radial.onDrop = { [weak self] u,a in self?.panel.orderOut(nil); self?.manual = false; self?.perform(u,a) }; panel.contentView = glassHost(radial,cornerRadius:124)
-        timer = Timer.scheduledTimer(withTimeInterval: 0.045, repeats: true) { [weak self] _ in self?.tick() }
+        timer = Timer(timeInterval: 0.045, repeats: true) { [weak self] _ in self?.tick() }
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .eventTracking)
+        }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { self?.panel.orderOut(nil); self?.manual = false; return nil }; return event
         }
         if let i = CommandLine.arguments.firstIndex(of:"--preview"), CommandLine.arguments.count > i+2 { perform(URL(fileURLWithPath:CommandLine.arguments[i+1]),CommandLine.arguments[i+2]) }
+        else { showWelcome() }
     }
     func registerLoginItem() {
         guard #available(macOS 13.0, *) else { return }
@@ -547,18 +558,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func item(_ title: String,_ action: Selector,_ key: String) -> NSMenuItem { let i = NSMenuItem(title: title,action: action,keyEquivalent: key); i.target = self; return i }
     @objc func quit() { NSApp.terminate(nil) }
     @objc func showConversions() { presentConversions() }
+    @objc func dismissConversions() { conversionPanel?.orderOut(nil) }
+    func dismissWelcome() {
+        welcome?.close()
+        welcome = nil
+    }
     func presentConversions() {
+        dismissWelcome()
         if conversionPanel == nil {
             let view = ConversionProgressView(center: conversions)
-            let w = NSPanel(contentRect: NSRect(x: 0,y: 0,width: 450,height: 340), styleMask: [.titled,.closable,.utilityWindow,.nonactivatingPanel], backing: .buffered, defer: false)
+            let w = ConversionPanel(contentRect: NSRect(x: 0,y: 0,width: 450,height: 340), styleMask: [.titled,.closable,.utilityWindow,.nonactivatingPanel], backing: .buffered, defer: false)
             w.title = "FileHalo Conversions"; w.isReleasedWhenClosed = false; w.isOpaque = false; w.backgroundColor = .clear
-            w.titlebarAppearsTransparent = true; w.level = .floating; w.hidesOnDeactivate = false
+            w.isRestorable = false
+            w.level = .floating; w.hidesOnDeactivate = false
             w.contentView = glassHost(NSHostingView(rootView: view), cornerRadius: 18); w.center(); conversionPanel = w
+            w.standardWindowButton(.closeButton)?.target = self
+            w.standardWindowButton(.closeButton)?.action = #selector(dismissConversions)
         }
         conversionPanel?.orderFrontRegardless()
     }
     @objc func showWelcome() {
-        if let welcome { welcome.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        guard !preferences.bool(forKey: "hasShownWelcome") else { return }
+        preferences.set(true, forKey: "hasShownWelcome")
         let view = VStack(alignment: .leading, spacing: 20) {
             HStack { Image(systemName: "circle.hexagongrid.fill").font(.system(size: 42)).foregroundStyle(.primary); Text("FileHalo").font(.system(size: 36,weight: .bold,design: .rounded)) }
             Text("A little circle. A lot of possibilities.").font(.title3)
@@ -567,7 +588,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             HStack { Button("Choose a File…") { self.choose() }.buttonStyle(.borderedProminent).tint(.gray) }
             Text("Runs locally • No uploads • Look for the FileHalo icon in the menu bar").font(.caption).foregroundStyle(.secondary)
         }.padding(30).frame(width: 440).background(Color.clear)
-        let w = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 500,height: 390),styleMask: [.titled,.closable],backing: .buffered,defer: false); w.title = "Welcome to FileHalo"; w.isOpaque = false; w.backgroundColor = .clear; w.titlebarAppearsTransparent = true; w.contentView = glassHost(NSHostingView(rootView: view)); w.center(); w.isReleasedWhenClosed = false; welcome = w; w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        let w = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 500,height: 390),styleMask: [.titled,.closable],backing: .buffered,defer: false); w.title = "Welcome to FileHalo"; w.isRestorable = false; w.isOpaque = false; w.backgroundColor = .clear; w.titlebarAppearsTransparent = true; w.contentView = glassHost(NSHostingView(rootView: view)); w.center(); w.isReleasedWhenClosed = false; welcome = w; w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc func choose() { let p = NSOpenPanel(); p.canChooseDirectories = false; p.allowsMultipleSelection = false; NSApp.activate(ignoringOtherApps: true); if p.runModal() == .OK, let u = p.url { current = u; manual = true; display(u, tools: false) } }
     func formats(_ u: URL) -> [String] {
@@ -579,6 +600,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return ["jpg","png","webp","heic","tiff","avif","bmp","pdf","Tools"]
     }
     func display(_ u: URL, tools: Bool) {
+        dismissWelcome()
         radial.file = u; radial.actions = tools ? ["Compress","Metadata","Edit","Annotate","Add BG","Crop","Redact","Formats"] : formats(u); radial.selected = -1; radial.needsDisplay = true
         let p = NSEvent.mouseLocation; let screen = NSScreen.screens.first(where: { $0.frame.contains(p) })?.visibleFrame ?? NSScreen.main!.visibleFrame
         let x = max(screen.minX,min(p.x-124,screen.maxX-248)), y = max(screen.minY,min(p.y-124,screen.maxY-248))
@@ -603,6 +625,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true); let a = NSAlert(); a.messageText = error ? "Couldn’t complete that" : "Saved successfully"; a.informativeText = s; a.alertStyle = error ? .warning : .informational; a.runModal()
     }
     func perform(_ u: URL,_ action: String) {
+        dismissWelcome()
         if action == "Tools" || action == "Formats" { manual = true; display(u,tools: action == "Tools"); return }
         if action == "Metadata" {
             do { let attrs = try FileManager.default.attributesOfItem(atPath: u.path); var s = "\(u.lastPathComponent)\n\(u.path)\n\nSize: \(ByteCountFormatter.string(fromByteCount: (attrs[.size] as? NSNumber)?.int64Value ?? 0,countStyle: .file))\nModified: \(attrs[.modificationDate] ?? "Unknown")\n"
@@ -684,6 +707,30 @@ if CommandLine.arguments.contains("--self-test") {
         }
         let wheel = RadialView(frame:NSRect(x:0,y:0,width:326,height:326)); wheel.actions = ["DOCX","JPG","PNG","TXT"]
         guard wheel.index(NSPoint(x:163,y:263)) == 0, wheel.index(NSPoint(x:263,y:163)) == 1, wheel.index(NSPoint(x:163,y:163)) == -1 else { throw failure("Radial selection") }; print("PASS wheel hit testing")
+        let trackingTimerFired = LockedDouble()
+        let trackingTimer = Timer(timeInterval: 0.001, repeats: false) { _ in trackingTimerFired.set(1) }
+        RunLoop.main.add(trackingTimer, forMode: .common)
+        RunLoop.main.add(trackingTimer, forMode: .eventTracking)
+        _ = RunLoop.main.run(mode: .eventTracking, before: Date(timeIntervalSinceNow: 0.1))
+        guard trackingTimerFired.get() == 1 else { throw failure("Shift-drag polling timer paused in event-tracking mode") }
+        print("PASS drag-tracking wheel timer")
+        let windowDelegate = AppDelegate()
+        let preferenceDomain = "FileHalo.WindowTests.\(UUID().uuidString)"
+        guard let testPreferences = UserDefaults(suiteName: preferenceDomain) else { throw failure("Window test preferences") }
+        defer { testPreferences.removePersistentDomain(forName: preferenceDomain) }
+        windowDelegate.preferences = testPreferences
+        windowDelegate.showWelcome()
+        guard windowDelegate.welcome?.isVisible == true else { throw failure("First launch welcome missing") }
+        windowDelegate.presentConversions()
+        guard windowDelegate.welcome == nil, windowDelegate.conversionPanel?.isVisible == true else { throw failure("Conversion did not dismiss onboarding") }
+        windowDelegate.conversionPanel?.standardWindowButton(.closeButton)?.performClick(nil)
+        guard windowDelegate.conversionPanel?.isVisible == false else { throw failure("Conversion close button failed") }
+        windowDelegate.showWelcome()
+        guard windowDelegate.welcome == nil else { throw failure("Welcome reappeared after onboarding") }
+        windowDelegate.presentConversions()
+        guard windowDelegate.conversionPanel?.isVisible == true else { throw failure("Conversion panel could not reopen") }
+        windowDelegate.dismissConversions()
+        print("PASS first-launch-only welcome and conversion close/reopen")
         print("ALL CHECKS PASSED"); exit(0)
     } catch { fputs("SELF TEST FAILED: \(error)\n",stderr); exit(1) }
 }
