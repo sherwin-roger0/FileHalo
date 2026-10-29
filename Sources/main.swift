@@ -8,6 +8,7 @@ import Vision
 import ServiceManagement
 import AVFoundation
 import CoreText
+import Darwin
 
 let accent = NSColor.systemGray
 let appName = "FileHalo"
@@ -21,6 +22,29 @@ func uniqueURL(_ source: URL, _ suffix: String, _ ext: String) -> URL {
     var n = 2
     while FileManager.default.fileExists(atPath: u.path) { u = dir.appendingPathComponent("\(base) \(n)").appendingPathExtension(ext); n += 1 }
     return u
+}
+func reserveUniqueURL(_ source: URL, _ suffix: String, _ ext: String) throws -> (url: URL, marker: URL) {
+    let base = source.deletingPathExtension().lastPathComponent + suffix
+    let dir = source.deletingLastPathComponent()
+    var index = 1
+    while true {
+        let stem = index == 1 ? base : "\(base) \(index)"
+        let url = dir.appendingPathComponent(stem).appendingPathExtension(ext)
+        let marker = dir.appendingPathComponent(".\(url.lastPathComponent).filehalo-reservation")
+        if FileManager.default.fileExists(atPath: url.path) { index += 1; continue }
+        let fd = open(marker.path, O_CREAT | O_EXCL | O_WRONLY, S_IRUSR | S_IWUSR)
+        if fd >= 0 {
+            close(fd)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: marker)
+                index += 1
+                continue
+            }
+            return (url, marker)
+        }
+        if errno == EEXIST { index += 1; continue }
+        throw failure("Could not reserve an output filename: \(String(cString: strerror(errno)))")
+    }
 }
 func loadImage(_ url: URL) throws -> NSImage {
     if url.pathExtension.lowercased() == "pdf", let page = PDFDocument(url: url)?.page(at: 0) {
@@ -141,7 +165,13 @@ func runFFmpeg(_ args: [String], duration: Double? = nil, progress: ((Double) ->
     }
 }
 func convert(_ u: URL, to ext: String, progress: ((Double) -> Void)? = nil) throws -> [URL] {
-    let out = uniqueURL(u, "", ext)
+    let reservation = try reserveUniqueURL(u, "", ext)
+    let out = reservation.url
+    var keepOutput = false
+    defer {
+        try? FileManager.default.removeItem(at: reservation.marker)
+        if !keepOutput { try? FileManager.default.removeItem(at: out) }
+    }
     let input = u.pathExtension.lowercased()
     if ["mp4", "mov", "mkv", "webm", "avi", "mp3", "wav", "m4a", "aac", "flac", "ogg"].contains(input) {
         var args = ["-i", u.path]
@@ -150,6 +180,7 @@ func convert(_ u: URL, to ext: String, progress: ((Double) -> Void)? = nil) thro
         if ext == "mp4" { args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"] }
         args += [out.path]
         try runFFmpeg(args, duration: mediaDuration(u), progress: progress)
+        keepOutput = true
         return [out]
     }
     if ext == "txt" || ext == "docx" {
@@ -160,30 +191,37 @@ func convert(_ u: URL, to ext: String, progress: ((Double) -> Void)? = nil) thro
             let attr = NSAttributedString(string: t, attributes: [.font: NSFont.systemFont(ofSize: 12)])
             let data = try attr.data(from: NSRange(location: 0, length: attr.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML])
             try data.write(to: out, options: .atomic)
-        }; return [out]
+        }; keepOutput = true; return [out]
     }
     if input == "pdf", let doc = PDFDocument(url: u), ext != "pdf" {
         var result: [URL] = []
+        var reservations: [URL] = []
+        defer { reservations.forEach { try? FileManager.default.removeItem(at: $0) } }
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }; let b = page.bounds(for: .mediaBox)
             let image = page.thumbnail(of: NSSize(width: b.width * 2, height: b.height * 2), for: .mediaBox)
-            let target = doc.pageCount == 1 ? out : uniqueURL(u, " Page \(i + 1)", ext)
-            try saveImage(image, to: target); result.append(target)
-        }; return result
+            let targetReservation = doc.pageCount == 1 ? (url: out, marker: reservation.marker) : try reserveUniqueURL(u, " Page \(i + 1)", ext)
+            if doc.pageCount > 1 { reservations.append(targetReservation.marker) }
+            do { try saveImage(image, to: targetReservation.url); result.append(targetReservation.url) }
+            catch { result.forEach { try? FileManager.default.removeItem(at: $0) }; throw error }
+        }; keepOutput = true; return result
     }
     if ext == "pdf", ["txt", "docx", "rtf", "html"].contains(input) {
         let text = try textFrom(u)
-        try writeTextPDF(text, to: out); return [out]
+        try writeTextPDF(text, to: out); keepOutput = true; return [out]
     }
     if ext == "webp" {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("png")
         defer { try? FileManager.default.removeItem(at: temp) }
         try saveImage(loadImage(u),to:temp)
-        guard let encoder = bundledTool("cwebp") else { throw failure("WebP encoder is missing from this download.") }; let process = Process(); process.executableURL = URL(fileURLWithPath:encoder); process.arguments = ["-quiet","-q","88",temp.path,"-o",out.path]; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-        try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw failure("WebP encoding failed") }; return [out]
+        guard let encoder = bundledTool("cwebp") else { throw failure("WebP encoder is missing from this download.") }; let process = Process(); process.executableURL = URL(fileURLWithPath:encoder); process.arguments = ["-quiet","-q","88",temp.path,"-o",out.path]; process.standardOutput = FileHandle.nullDevice
+        let errors = Pipe(); process.standardError = errors
+        try process.run(); process.waitUntilExit()
+        let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0 else { throw failure(message?.isEmpty == false ? "WebP encoding failed: \(message!)" : "WebP encoding failed (encoder exit \(process.terminationStatus)).") }; keepOutput = true; return [out]
     }
-    if ext == "avif" { try runFFmpeg(["-i",u.path,"-frames:v","1","-c:v","libsvtav1","-pix_fmt","yuv420p",out.path]); return [out] }
-    try saveImage(loadImage(u), to: out); return [out]
+    if ext == "avif" { try runFFmpeg(["-i",u.path,"-frames:v","1","-c:v","libsvtav1","-pix_fmt","yuv420p",out.path]); keepOutput = true; return [out] }
+    try saveImage(loadImage(u), to: out); keepOutput = true; return [out]
 }
 
 func glassHost(_ content: NSView, cornerRadius: CGFloat = 24) -> NSView {
@@ -602,9 +640,38 @@ if CommandLine.arguments.contains("--self-test") {
         for ext in ["jpg","png","tiff","heic","bmp","pdf","webp","avif"] {
             let result = try convert(source,to:ext); guard result.allSatisfy({ FileManager.default.fileExists(atPath:$0.path) }) else { throw failure("Missing conversion " + ext) }; print("PASS image → " + ext)
         }
+        let resultLock = NSLock(); var concurrentOutputs: [[URL]] = []; var concurrentErrors: [Error] = []
+        let conversionGroup = DispatchGroup()
+        for _ in 0..<2 {
+            conversionGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { let outputs = try convert(source, to: "jpg"); resultLock.lock(); concurrentOutputs.append(outputs); resultLock.unlock() }
+                catch { resultLock.lock(); concurrentErrors.append(error); resultLock.unlock() }
+                conversionGroup.leave()
+            }
+        }
+        conversionGroup.wait()
+        guard concurrentErrors.isEmpty, concurrentOutputs.count == 2, Set(concurrentOutputs.compactMap({ $0.first?.path })).count == 2,
+              concurrentOutputs.flatMap({ $0 }).allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else { throw failure("Concurrent conversions collided or failed") }
+        print("PASS concurrent output reservations")
+        let damaged = dir.appendingPathComponent("damaged.png")
+        try Data([0, 1, 2, 3, 4]).write(to: damaged)
+        var rejectedInvalidInput = false
+        do { _ = try convert(damaged, to: "jpg") } catch { rejectedInvalidInput = true }
+        guard rejectedInvalidInput, !FileManager.default.fileExists(atPath: dir.appendingPathComponent("damaged.jpg").path) else { throw failure("Invalid input was accepted or left a partial output") }
+        print("PASS failed output cleanup")
         let doc = PDFDocument(); doc.insert(PDFPage(image:image)!,at:0); doc.insert(PDFPage(image:image)!,at:1); let pdf = dir.appendingPathComponent("pages.pdf"); guard doc.write(to:pdf) else { throw failure("PDF fixture") }; let pages = try convert(pdf,to:"png"); guard pages.count == 2 else { throw failure("Missing PDF pages") }; print("PASS multipage PDF")
         let txt = dir.appendingPathComponent("text.txt"); try "FileHalo conversion test\nHello from the Mac.".write(to:txt,atomically:true,encoding:.utf8)
         let word = try convert(txt,to:"docx")[0]; guard try textFrom(word).contains("Hello from the Mac") else { throw failure("DOCX roundtrip") }; print("PASS DOCX roundtrip")
+        let movie = dir.appendingPathComponent("sample.mp4")
+        guard let ffmpeg = bundledTool("ffmpeg") else { throw failure("FFmpeg missing during media self-test") }
+        let fixture = Process(); fixture.executableURL = URL(fileURLWithPath: ffmpeg)
+        fixture.arguments = ["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", movie.path]
+        fixture.standardOutput = FileHandle.nullDevice; fixture.standardError = FileHandle.nullDevice
+        try fixture.run(); fixture.waitUntilExit(); guard fixture.terminationStatus == 0 else { throw failure("Could not create FFmpeg media fixture") }
+        for ext in ["mp4", "webm", "wav", "mp3"] {
+            let output = try convert(movie, to: ext); guard output.count == 1, let file = output.first, let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 512 else { throw failure("Media conversion produced an invalid \(ext) output") }; print("PASS video/audio → " + ext)
+        }
         for mode in ["Crop","Add BG","Redact","Annotate","Compress","Edit"] {
             let m = EditModel(source:source,image:image,mode:mode)
             if mode == "Crop" { m.left = 0.1; m.top = 0.1 }

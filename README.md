@@ -12,7 +12,7 @@ Watch the [75-second narrated product demo](https://filehalo.artificialwizard.in
 
 ## Use
 
-Open FileHalo. Drag a file from Finder and hold Shift briefly. Drop onto a segment to convert. Keep holding Shift for about 1.25 seconds to switch to the image tools wheel. Outputs are saved alongside the original with a unique filename. Existing files are never overwritten.
+Open FileHalo. Drag a file from Finder and hold Shift to summon the format wheel. Drop on **Tools** to open image tools or on **Formats** to return to format choices. Drop on a format to convert. Outputs are saved alongside the original with a unique filename. Existing files are never overwritten, including when two conversions of the same file run at once.
 
 You can also use the FileHalo menu-bar icon → **Choose File…**, then click a segment. Select **Tools** or **Formats** to change wheels. Quit from the menu-bar menu.
 
@@ -30,7 +30,7 @@ You can also use the FileHalo menu-bar icon → **Choose File…**, then click a
 - Image adjustments: brightness, contrast, saturation, quarter-turn rotation.
 - File and image metadata viewer.
 - Audio/video conversions using this Mac’s FFmpeg installation.
-- A floating conversion panel lists every queued and active conversion; FFmpeg jobs show live progress, and up to two conversions can run at once. Reopen it from the menu bar when needed.
+- A floating conversion panel lists every queued and active conversion; FFmpeg jobs show live progress, and up to two conversions can run at once. Reopen it from the menu bar when needed. Failed conversions remove partial output files.
 - Local processing, no network services, and original files preserved.
 
 ## Scope and current limits
@@ -41,7 +41,7 @@ The free direct-download release is ad-hoc signed and not Apple-notarized. macOS
 
 ## Verification
 
-Built with the installed Xcode Swift compiler for Apple silicon, macOS 14+. Automated checks cover eight image output formats, multipage PDF output, DOCX text round-trip, six editor rendering paths, crop pixel dimensions, and radial hit testing. The installed background editor was visually checked and its Save Copy action produced a real output file. The global Shift-drag interaction is implemented but has not been verified end-to-end through UI automation.
+Built with the installed Xcode Swift compiler for Apple silicon, macOS 14+. Automated checks cover eight image output formats (including bundled WebP and AVIF encoders), concurrent filename reservations, failed-output cleanup, multipage PDF output, DOCX text round-trip, MP4/WebM/WAV/MP3 conversion, six editor rendering paths, crop pixel dimensions, and radial hit testing. The global Shift-drag interaction is implemented but has not been verified end-to-end through UI automation.
 
 ## Rebuild
 

@@ -12,11 +12,16 @@ FRAMEWORKS="$RES/Frameworks"
 mkdir -p "$TOOLS" "$FRAMEWORKS" "$RES/ThirdPartyLicenses"
 cp -L "$FFMPEG" "$TOOLS/ffmpeg"
 cp -L "$CWEBP" "$TOOLS/cwebp"
-python3 package-libraries.py "$TOOLS/ffmpeg" "$TOOLS/cwebp" "$FRAMEWORKS"
+HOMEBREW_LIBRARY_PATHS="$(brew --prefix webp)/lib" python3 package-libraries.py "$TOOLS/ffmpeg" "$TOOLS/cwebp" "$FRAMEWORKS"
 cp "$(brew --prefix ffmpeg)/COPYING.GPLv3" "$RES/ThirdPartyLicenses/FFmpeg-GPLv3.txt"
 cp "$(brew --prefix ffmpeg)/COPYING.LGPLv2.1" "$RES/ThirdPartyLicenses/FFmpeg-LGPLv2.1.txt"
 cp "$(brew --prefix ffmpeg)/COPYING.LGPLv3" "$RES/ThirdPartyLicenses/FFmpeg-LGPLv3.txt"
 cp "$(brew --prefix ffmpeg)/COPYING.GPLv2" "$RES/ThirdPartyLicenses/FFmpeg-GPLv2.txt"
 cp "$(brew --prefix webp)/COPYING" "$RES/ThirdPartyLicenses/WebP-COPYING.txt"
+# install_name_tool invalidates signatures. Sign every embedded executable and
+# library explicitly before sealing the outer app bundle.
+while IFS= read -r -d '' MACHO; do
+  codesign --force --sign - "$MACHO"
+done < <(find "$TOOLS" "$FRAMEWORKS" -type f -print0)
 codesign --force --deep --sign - "$BUNDLE"
 echo "Created portable bundle at $BUNDLE"

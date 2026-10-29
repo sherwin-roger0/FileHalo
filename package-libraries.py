@@ -4,6 +4,7 @@ import hashlib, os, pathlib, re, shutil, subprocess, sys
 
 frameworks = pathlib.Path(sys.argv[-1]).resolve()
 binaries = [pathlib.Path(x).resolve() for x in sys.argv[1:-1]]
+extra_library_dirs = [pathlib.Path(x).resolve() for x in os.environ.get("HOMEBREW_LIBRARY_PATHS", "").split(os.pathsep) if x]
 queue = list(binaries)
 seen = set()
 rewrites = {}
@@ -30,6 +31,9 @@ def resolve(dep, owner):
         for rp in rpaths(owner):
             rp=rp.replace("@loader_path",str(owner.parent)).replace("@executable_path",str(binaries[0].parent))
             candidates.append(pathlib.Path(rp)/tail)
+        # Copying a Homebrew executable into the app changes @loader_path.
+        # Let the packager provide its original library directory as a fallback.
+        candidates.extend(directory / pathlib.Path(tail).name for directory in extra_library_dirs)
     for c in candidates:
         if c.exists() and str(c.resolve()).startswith("/opt/homebrew/"): return c.resolve()
     return None
